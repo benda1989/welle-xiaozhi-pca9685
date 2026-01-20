@@ -50,16 +50,8 @@ private:
     bool web_control_enabled_ = false;
 
     // 舵机角度范围和中心位置
-    enum ServoType {
-
-        SERVO_360_DEGREE = 0,  // 360度连续旋转舵机
-        SERVO_180_DEGREE = 1,  // 180度标准舵机
-        SERVO_180_MIRRORED = 2, // 180度镜像安装舵机
-        SERVO_360_MIRRORED = 3 // 360度镜像连续旋转舵机
-    };
-
     struct ServoConfig {
-        ServoType type;
+        bool is_mirrored;       
         uint16_t min_angle;
         uint16_t max_angle;
         uint16_t center_angle;
@@ -68,68 +60,48 @@ private:
     
     ServoConfig servo_configs_[8];
 
-    struct WelleActionParams {
-        int action_type;
+    enum class ActionType {
+        HOME ,        // 回中心位置
+        SERVO,           // 舵机控制
+        MOVE_FORWARD,    // 前进
+        MOVE_BACKWARD,   // 后退
+        TURN_LEFT,       // 左转
+        TURN_RIGHT,      // 右转
+        STOP_MOVEMENT,   // 停止移动
+        // 其他动作
+    };
+
+    struct ActionParams {
+        ActionType action;
         int channel;
         int angle;
-        int speed;
     };
+    
 
-    enum ActionType {
-        ACTION_SET_SERVO_ANGLE = 1,
-        ACTION_HOME = 2
-    };
-
-    uint16_t AngleToLusPulse(uint16_t angle) {
-        // 1ms-2ms脉宽对应205-409 PWM值 (50Hz, 12位分辨率)
-        return 102 + (angle * 410 / 180);
-    }
-
+ 
     uint16_t ProcessServoAngle(uint8_t channel, uint16_t angle) {
         ServoConfig& config = servo_configs_[channel];
         int processed_angle = angle;
         
         // 应用微调
         processed_angle += config.trim;
-        
-        // 根据舵机类型处理角度
-        switch (config.type) {
-            case SERVO_360_DEGREE:
-                // 360度舵机：90度停止，小于90度正转，大于90度反转
-                break;
-            case SERVO_360_MIRRORED:
-                // 镜像安装舵机：角度反向
-                processed_angle = 180 - processed_angle;
-                break;
-            case SERVO_180_DEGREE:
-                // 标准180度舵机
-                break;
-            case SERVO_180_MIRRORED:
-                // 镜像安装舵机：角度反向
-                processed_angle = 180 - processed_angle;
-                break;
+        if (config.is_mirrored) {
+            processed_angle = 180 - processed_angle;
         }
-        
-        // 角度限制
         processed_angle = std::max((int)config.min_angle, 
-                                  std::min((int)config.max_angle, processed_angle));
-        
+                                    std::min((int)config.max_angle, processed_angle));
         return (uint16_t)processed_angle;
     }
 
     esp_err_t SetServoAngle(uint8_t channel, uint16_t angle) {
-        if (channel >= 8) {
-            ESP_LOGE(TAG, "无效的舵机通道: %d", channel);
-            return ESP_ERR_INVALID_ARG;
-        }
-        
         if (!pca9685_initialized_) {
             ESP_LOGE(TAG, "PCA9685未初始化");
             return ESP_FAIL;
         }
 
         uint16_t processed_angle = ProcessServoAngle(channel, angle);
-        uint16_t pwm_value = AngleToLusPulse(processed_angle);
+        // 1ms-2ms脉宽对应205-409 PWM值 (50Hz, 12位分辨率)
+        uint16_t pwm_value = 102 + (processed_angle * 410 / 180);
         esp_err_t ret = pca9685_set_pwm_value(&pca9685_dev_, channel, pwm_value);
         
         if (ret == ESP_OK) {
@@ -145,77 +117,65 @@ private:
 
     static void ActionTask(void* arg) {
         WelleController* controller = static_cast<WelleController*>(arg);
-        WelleActionParams params;
+        ActionParams params;
 
         while (true) {
             if (xQueueReceive(controller->action_queue_, &params, pdMS_TO_TICKS(1000)) == pdTRUE) {
-                ESP_LOGI(TAG, "执行动作: %d", params.action_type);
+                ESP_LOGI(TAG, "执行动作: %d", (int)params.action);
                 controller->is_action_in_progress_ = true;
-
-                switch (params.action_type) {
-                    case ACTION_SET_SERVO_ANGLE:
-                        controller->SetServoAngle(params.channel, params.angle);
-                        if (params.speed > 0) {
-                            vTaskDelay(pdMS_TO_TICKS(params.speed));
-                        }
-                        break;
-                    case ACTION_HOME:
-                        // 回到中心位置
-                        for (int i = 0; i < 8; i++) {
+                if (params.action == ActionType::HOME) {
+                    for (int i = 0; i < 8; i++) {
                             controller->SetServoAngle(i, controller->servo_configs_[i].center_angle);
                             vTaskDelay(pdMS_TO_TICKS(100));
                         }
-                        break;
+                } else {
+                    controller->SetServoAngle(params.channel, params.angle);
                 }
-                
                 controller->is_action_in_progress_ = false;
                 vTaskDelay(pdMS_TO_TICKS(20));
             }
         }
     }
 
-    void StartActionTaskIfNeeded() {
+    void StartActionTask() {
         if (action_task_handle_ == nullptr) {
             xTaskCreate(ActionTask, "welle_action", 1024 * 3, this, configMAX_PRIORITIES - 1,
                         &action_task_handle_);
         }
     }
 
-    void QueueServoAction(int channel, int angle, int delay_ms = 0) {
+    void QueueServoAction(int channel, int angle ) {
         if (channel < 0 || channel >= 8) {
             ESP_LOGW(TAG, "无效的舵机通道: %d", channel);
             return;
         }
-        ESP_LOGI(TAG, "舵机控制: 通道=%d, 角度=%d°, 延时=%dms", channel, angle, delay_ms);
-        WelleActionParams params = {ACTION_SET_SERVO_ANGLE, channel, angle, delay_ms};
+        ActionParams params = {ActionType::SERVO, channel, angle};
         xQueueSend(action_queue_, &params, portMAX_DELAY);
-        StartActionTaskIfNeeded();
     }
     
     void QueueHomeAction() {
         ESP_LOGI(TAG, "回到中心位置");
-        WelleActionParams params = {ACTION_HOME, 0, 0, 0};
+        ActionParams params = {ActionType::HOME, 0, 0};
         xQueueSend(action_queue_, &params, portMAX_DELAY);
-        StartActionTaskIfNeeded();
     }
 
     void InitializeServos() {
-        // 左轮 - 360度连续旋转
-        servo_configs_[LEFT_WHEEL_CHANNEL] = {SERVO_360_MIRRORED, 0, 180, 90, 0};
-        // 右轮 - 360度连续旋转
-        servo_configs_[RIGHT_WHEEL_CHANNEL] = {SERVO_360_DEGREE, 0, 180, 90, 0};
-        // 左手 - 180度镜像安装
-        servo_configs_[LEFT_HAND_CHANNEL] = {SERVO_180_DEGREE, 0, 180, 90, 0};
-        // 右手 - 180度标准
-        servo_configs_[RIGHT_HAND_CHANNEL] = {SERVO_180_MIRRORED, 0, 180, 90, 0};
-        // 左眼 - 180度镜像安装
-        servo_configs_[LEFT_EYE_CHANNEL] = {SERVO_180_MIRRORED, 0, 180, 90, 0};
-        // 右眼 - 180度标准
-        servo_configs_[RIGHT_EYE_CHANNEL] = {SERVO_180_DEGREE, 0, 180, 90, 0};
-        // 脖子 - 180度标准
-        servo_configs_[NECK_CHANNEL] = {SERVO_180_MIRRORED, 0, 180, 90, 90};
-        // 头 - 180度标准
-        servo_configs_[HEAD_CHANNEL] = {SERVO_180_DEGREE, 0, 180, 90, 90};
+        // 左轮 - 镜像安装（物理安装方向相反）
+        servo_configs_[LEFT_WHEEL_CHANNEL] = {true, 0, 180, 90, 0};
+        // 右轮 - 标准安装
+        servo_configs_[RIGHT_WHEEL_CHANNEL] = {false, 0, 180, 90, 0};
+        // 左手 - 标准安装
+        servo_configs_[LEFT_HAND_CHANNEL] = {false, 0, 180, 90, 90};
+        // 右手 - 镜像安装
+        servo_configs_[RIGHT_HAND_CHANNEL] = {true, 0, 180, 90, 90};
+        // 左眼 - 镜像安装
+        servo_configs_[LEFT_EYE_CHANNEL] = {true, 50, 130, 90, 90};
+        // 右眼 - 标准安装
+        servo_configs_[RIGHT_EYE_CHANNEL] = {false, 50, 130, 90, 90};
+        // 脖子 - 镜像安装
+        servo_configs_[NECK_CHANNEL] = {true, 50, 130, 90, 90};
+        // 头 - 标准安装
+        servo_configs_[HEAD_CHANNEL] = {false, 50, 130, 90, 90};
     }
     
     void LoadTrimsFromNVS() {
@@ -271,237 +231,128 @@ private:
         return ESP_OK;
     }
 
-    // WiFi消息解析函数，参考wall-e-code项目
+    // 统一动作控制器 - 核心控制抽象层
+    class UnifiedActionController {
+    private:
+        WelleController* welle_;
+        esp_timer_handle_t movement_timer_ = nullptr;
+        
+        // 执行移动组合动作 (私有方法) - 处理逻辑层运动控制
+        bool ExecuteMoveAction(ActionType action, int speed) {
+            int left_wheel_angle, right_wheel_angle;
+            switch (action) {
+                case ActionType::MOVE_FORWARD:
+                    left_wheel_angle = 90 + std::min(speed, 90);
+                    right_wheel_angle = left_wheel_angle;
+                    break;
+                    
+                case ActionType::MOVE_BACKWARD:
+                    left_wheel_angle = 90 - std::min(speed, 90);
+                    right_wheel_angle = left_wheel_angle;
+                    break;
+                    
+                case ActionType::TURN_LEFT:
+                    left_wheel_angle = 90 ;
+                    right_wheel_angle = 90 + std::min(speed, 90);
+                    break;
+                    
+                case ActionType::TURN_RIGHT:
+                    left_wheel_angle = 90 + std::min(speed, 90);
+                    right_wheel_angle = 90;
+                    break;
+                default:
+                    left_wheel_angle = 90;
+                    right_wheel_angle = 90;
+            }
+            welle_->QueueServoAction(LEFT_WHEEL_CHANNEL, left_wheel_angle);
+            welle_->QueueServoAction(RIGHT_WHEEL_CHANNEL, right_wheel_angle);
+            return true;
+        }
+
+    public:
+        UnifiedActionController(WelleController* welle) : welle_(welle) {}
+        
+        // 统一的字符串命令解析和执行接口
+        bool ExecuteAction(const std::string& command) {
+            ESP_LOGI(TAG, "处理统一动作命令: %s", command.c_str());
+            // 解析格式: action:param 或 channel:angle
+            char first_part[30];
+            int param = 0;
+            int parsed = sscanf(command.c_str(), "%[^:]:%d", first_part, &param);
+            
+            if (parsed >= 1) {
+                ActionParams params;
+                params.angle = (parsed >= 2) ? param : 50;  
+                // 检查是否为动作命令
+                if (strcmp(first_part, "move_forward") == 0) {
+                    params.action = ActionType::MOVE_FORWARD;
+                } else if (strcmp(first_part, "move_backward") == 0) {
+                    params.action = ActionType::MOVE_BACKWARD;
+                } else if (strcmp(first_part, "turn_left") == 0) {
+                    params.action = ActionType::TURN_LEFT;
+                } else if (strcmp(first_part, "turn_right") == 0) {
+                    params.action = ActionType::TURN_RIGHT;
+                } else if (strcmp(first_part, "stop") == 0) {
+                    params.action = ActionType::STOP_MOVEMENT;
+                } else if (strcmp(first_part, "home") == 0) {
+                    params.action = ActionType::HOME;
+                } else {
+                    int channel = atoi(first_part);
+                    if (channel >= 0 && channel <= 7) {
+                        params.action = ActionType::SERVO;
+                        params.channel = channel;
+                    } else {
+                        return false;
+                    }
+                }
+                return ExecuteAction(params);
+            }
+            return false;
+        }
+        
+        // 执行参数结构体的接口
+        bool ExecuteAction(const ActionParams& params) {
+            switch (params.action) {
+                case ActionType::SERVO:
+                    welle_->QueueServoAction(params.channel, params.angle);
+                    return true;
+                case ActionType::MOVE_FORWARD:
+                case ActionType::MOVE_BACKWARD:
+                case ActionType::TURN_LEFT:
+                case ActionType::TURN_RIGHT:
+                case ActionType::STOP_MOVEMENT:
+                    return ExecuteMoveAction(params.action, params.angle);
+                case ActionType::HOME:
+                    welle_->QueueHomeAction();
+                    return true;
+                default:
+                    return false;
+            }
+        }
+    };
+    
+    UnifiedActionController* action_controller_ = nullptr;
+    
+    // 简化的消息处理函数
     void ProcessWifiMessage(const char* message) {
-        if (!message) {
-            ESP_LOGE(TAG, "无效的消息参数");
+        if (!message || !action_controller_) {
+            ESP_LOGE(TAG, "无效的消息参数或控制器未初始化");
             return;
         }
-        
         ESP_LOGI(TAG, "处理WiFi消息: %s", message);
-        
-        // 处理预设动作
-        if (strcmp(message, "preset1") == 0) {
-            // 问候姿势: 左右手挥动，眼睛看向前方
-            QueueServoAction(LEFT_HAND_CHANNEL, 45, 0);
-            QueueServoAction(RIGHT_HAND_CHANNEL, 135, 100);
-            QueueServoAction(LEFT_EYE_CHANNEL, 60, 0);
-            QueueServoAction(RIGHT_EYE_CHANNEL, 120, 100);
-            QueueServoAction(NECK_CHANNEL, 90, 0);
-            QueueServoAction(HEAD_CHANNEL, 75, 0);
-            return;
-        } else if (strcmp(message, "preset2") == 0) {
-            // 思考姿势: 一只手托下巴
-            QueueServoAction(LEFT_HAND_CHANNEL, 120, 0);
-            QueueServoAction(RIGHT_HAND_CHANNEL, 60, 100);
-            QueueServoAction(LEFT_EYE_CHANNEL, 45, 0);
-            QueueServoAction(RIGHT_EYE_CHANNEL, 135, 100);
-            QueueServoAction(NECK_CHANNEL, 75, 0);
-            QueueServoAction(HEAD_CHANNEL, 105, 0);
-            return;
-        } else if (strcmp(message, "preset3") == 0) {
-            // 开心姿势: 双手举高
-            QueueServoAction(LEFT_HAND_CHANNEL, 30, 0);
-            QueueServoAction(RIGHT_HAND_CHANNEL, 150, 100);
-            QueueServoAction(LEFT_EYE_CHANNEL, 75, 0);
-            QueueServoAction(RIGHT_EYE_CHANNEL, 105, 100);
-            QueueServoAction(NECK_CHANNEL, 90, 0);
-            QueueServoAction(HEAD_CHANNEL, 60, 0);
-            return;
-        } else if (strcmp(message, "center") == 0) {
-            // 回中位
-            QueueHomeAction();
-            return;
-        }
-        
-        // 解析单个舵机控制指令，格式: "s1:180,s2:90,s3:45,..."
-        char* msg_copy = strdup(message);
-        if (!msg_copy) {
-            ESP_LOGE(TAG, "内存分配失败");
-            return;
-        }
-        
-        // 按逗号分割字符串
-        char* token = strtok(msg_copy, ",");
-        int processed_count = 0;
-        
-        while (token && processed_count < 8) {
-            // 解析格式 "sX:YYY"
-            if (token[0] != 's') {
-                ESP_LOGE(TAG, "无效格式: %s (缺少's')", token);
-                token = strtok(NULL, ",");
-                continue;
-            }
-            
-            // 查找冒号分隔符
-            char* colon_ptr = strchr(token, ':');
-            if (!colon_ptr) {
-                ESP_LOGE(TAG, "无效格式: %s (缺少':')", token);
-                token = strtok(NULL, ",");
-                continue;
-            }
-            
-            // 分割字符串并提取舵机编号
-            *colon_ptr = '\0';
-            int servo_num = atoi(token + 1);  // 跳过's'
-            if (servo_num < 1 || servo_num > 8) {
-                ESP_LOGE(TAG, "舵机编号超出范围: %d", servo_num);
-                token = strtok(NULL, ",");
-                continue;
-            }
-            
-            // 提取角度值
-            int angle = atoi(colon_ptr + 1);
-            if (angle < 0 || angle > 180) {
-                ESP_LOGE(TAG, "角度超出范围: %d", angle);
-                token = strtok(NULL, ",");
-                continue;
-            }
-            
-            // 执行舵机控制 (转换为0-7的通道号)
-            QueueServoAction(servo_num - 1, angle, 0);
-            ESP_LOGI(TAG, "设置舵机S%d角度为%d°", servo_num, angle);
-            processed_count++;
-            
-            token = strtok(NULL, ",");
-        }
-        
-        free(msg_copy);
-        ESP_LOGI(TAG, "WiFi消息处理完成，共处理%d个舵机指令", processed_count);
+        action_controller_->ExecuteAction(std::string(message));
     }
 
-    // HTTP请求处理器 - 主页面
+    // HTTP请求处理器 - 主页面(返回嵌入的HTML)
     static esp_err_t WebRootHandler(httpd_req_t *req) {
-        WelleController* controller = static_cast<WelleController*>(req->user_ctx);
+        // 声明嵌入的HTML文件
+        extern const char gamepad_min_html_start[] asm("_binary_gamepad_min_html_start");
+        extern const char gamepad_min_html_end[] asm("_binary_gamepad_min_html_end");
         
-        const char* html_response = 
-            "<!DOCTYPE html><html><head><meta charset='utf-8'><title>WALL-E 控制</title>"
-            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">"
-            "<style>"
-            "body { font-family: 'Segoe UI', Arial, sans-serif; text-align: center; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); margin: 0; padding: 20px; color: #333; }"
-            ".container { max-width: 900px; margin: 0 auto; background: rgba(255,255,255,0.95); padding: 30px; border-radius: 15px; box-shadow: 0 8px 25px rgba(0,0,0,0.3); }"
-            "h1 { color: #4a5568; margin-bottom: 30px; font-size: 2.5em; text-shadow: 2px 2px 4px rgba(0,0,0,0.1); }"
-            ".servo-group { margin: 25px 0; padding: 20px; background: #f8f9fa; border-radius: 10px; border-left: 4px solid #4CAF50; }"
-            ".servo-group h3 { margin-top: 0; color: #2d3748; font-size: 1.4em; }"
-            ".servo-control { margin: 15px 0; display: flex; align-items: center; justify-content: space-between; }"
-            ".servo-label { font-weight: bold; color: #4a5568; min-width: 120px; text-align: left; }"
-            "input[type=range] { flex: 1; margin: 0 15px; height: 8px; background: #ddd; border-radius: 5px; outline: none; }"
-            "input[type=range]::-webkit-slider-thumb { appearance: none; width: 20px; height: 20px; background: #4CAF50; cursor: pointer; border-radius: 50%; }"
-            ".angle-display { font-weight: bold; color: #2d3748; min-width: 50px; text-align: right; font-size: 1.1em; }"
-            ".preset-buttons { margin: 30px 0; }"
-            "button { padding: 12px 24px; margin: 8px; background: linear-gradient(145deg, #4CAF50, #45a049); color: white; border: none; border-radius: 8px; cursor: pointer; font-size: 16px; font-weight: bold; box-shadow: 0 4px 10px rgba(76, 175, 80, 0.3); transition: all 0.3s ease; }"
-            "button:hover { transform: translateY(-2px); box-shadow: 0 6px 15px rgba(76, 175, 80, 0.4); }"
-            "button:active { transform: translateY(0); }"
-            ".reset-btn { background: linear-gradient(145deg, #ff6b6b, #ee5a52); box-shadow: 0 4px 10px rgba(255, 107, 107, 0.3); }"
-            ".reset-btn:hover { box-shadow: 0 6px 15px rgba(255, 107, 107, 0.4); }"
-            "#status { margin: 25px 0; padding: 15px; background: #e3f2fd; border-radius: 8px; color: #1976d2; font-weight: bold; border: 1px solid #bbdefb; }"
-            ".emoji { font-size: 1.2em; margin-right: 8px; }"
-            "@media (max-width: 600px) { .servo-control { flex-direction: column; } .servo-label, .angle-display { margin: 5px 0; } }"
-            "</style></head><body>"
-            "<div class='container'>"
-            "<h1><span class='emoji'>🤖</span>WALL-E 控制面板</h1>"
-            
-            "<div class='servo-group'>"
-            "<h3><span class='emoji'>🚗</span>移动控制</h3>"
-            "<div class='servo-control'>"
-            "<span class='servo-label'>左轮</span>"
-            "<input type='range' id='s1' min='0' max='180' value='90' oninput='updateServo(1, this.value)'>"
-            "<span class='angle-display' id='s1_val'>90°</span>"
-            "</div>"
-            "<div class='servo-control'>"
-            "<span class='servo-label'>右轮</span>"
-            "<input type='range' id='s2' min='0' max='180' value='90' oninput='updateServo(2, this.value)'>"
-            "<span class='angle-display' id='s2_val'>90°</span>"
-            "</div></div>"
-            
-            "<div class='servo-group'>"
-            "<h3><span class='emoji'>🙌</span>手部控制</h3>"
-            "<div class='servo-control'>"
-            "<span class='servo-label'>左手</span>"
-            "<input type='range' id='s3' min='0' max='180' value='90' oninput='updateServo(3, this.value)'>"
-            "<span class='angle-display' id='s3_val'>90°</span>"
-            "</div>"
-            "<div class='servo-control'>"
-            "<span class='servo-label'>右手</span>"
-            "<input type='range' id='s4' min='0' max='180' value='90' oninput='updateServo(4, this.value)'>"
-            "<span class='angle-display' id='s4_val'>90°</span>"
-            "</div></div>"
-            
-            "<div class='servo-group'>"
-            "<h3><span class='emoji'>👀</span>眼部控制</h3>"
-            "<div class='servo-control'>"
-            "<span class='servo-label'>左眼</span>"
-            "<input type='range' id='s5' min='0' max='180' value='90' oninput='updateServo(5, this.value)'>"
-            "<span class='angle-display' id='s5_val'>90°</span>"
-            "</div>"
-            "<div class='servo-control'>"
-            "<span class='servo-label'>右眼</span>"
-            "<input type='range' id='s6' min='0' max='180' value='90' oninput='updateServo(6, this.value)'>"
-            "<span class='angle-display' id='s6_val'>90°</span>"
-            "</div></div>"
-            
-            "<div class='servo-group'>"
-            "<h3><span class='emoji'>🗣️</span>头部控制</h3>"
-            "<div class='servo-control'>"
-            "<span class='servo-label'>脖子</span>"
-            "<input type='range' id='s7' min='0' max='180' value='90' oninput='updateServo(7, this.value)'>"
-            "<span class='angle-display' id='s7_val'>90°</span>"
-            "</div>"
-            "<div class='servo-control'>"
-            "<span class='servo-label'>头部</span>"
-            "<input type='range' id='s8' min='0' max='180' value='90' oninput='updateServo(8, this.value)'>"
-            "<span class='angle-display' id='s8_val'>90°</span>"
-            "</div></div>"
-            
-            "<div class='preset-buttons'>"
-            "<button onclick='sendCommand(\"preset1\")'>🤝 预设1: 问候</button>"
-            "<button onclick='sendCommand(\"preset2\")'>🤔 预设2: 思考</button>"
-            "<button onclick='sendCommand(\"preset3\")'>🎉 预设3: 开心</button>"
-            "<button class='reset-btn' onclick='sendCommand(\"center\")'>🏠 回中位</button>"
-            "</div>"
-            
-            "<div id='status'>🟢 就绪 - 请拖动滑块或点击预设动作</div>"
-            "</div>"
-            
-            "<script>"
-            "function updateServo(servo, angle) {"
-            "  document.getElementById('s' + servo + '_val').textContent = angle + '°';"
-            "  sendServoCommand(servo, angle);"
-            "}"
-            "function sendServoCommand(servo, angle) {"
-            "  var cmd = 's' + servo + ':' + angle;"
-            "  sendCommand(cmd);"
-            "}"
-            "function sendCommand(cmd) {"
-            "  document.getElementById('status').textContent = '📡 发送中: ' + cmd;"
-            "  document.getElementById('status').style.background = '#fff3e0';"
-            "  document.getElementById('status').style.color = '#f57c00';"
-            "  var xhr = new XMLHttpRequest();"
-            "  xhr.open('POST', '/control', true);"
-            "  xhr.setRequestHeader('Content-Type', 'text/plain');"
-            "  xhr.onreadystatechange = function() {"
-            "    if (xhr.readyState == 4) {"
-            "      if (xhr.status == 200) {"
-            "        document.getElementById('status').textContent = '✅ 命令已执行: ' + cmd;"
-            "        document.getElementById('status').style.background = '#e8f5e8';"
-            "        document.getElementById('status').style.color = '#2e7d32';"
-            "      } else {"
-            "        document.getElementById('status').textContent = '❌ 发送失败: ' + cmd;"
-            "        document.getElementById('status').style.background = '#ffebee';"
-            "        document.getElementById('status').style.color = '#c62828';"
-            "      }"
-            "    }"
-            "  };"
-            "  xhr.send(cmd);"
-            "}"
-            "setTimeout(function() {"
-            "  document.getElementById('status').textContent = '🟢 就绪 - 请拖动滑块或点击预设动作';"
-            "  document.getElementById('status').style.background = '#e3f2fd';"
-            "  document.getElementById('status').style.color = '#1976d2';"
-            "}, 3000);"
-            "</script></body></html>";
+        const size_t gamepad_html_size = gamepad_min_html_end - gamepad_min_html_start;
         
-        httpd_resp_send(req, html_response, HTTPD_RESP_USE_STRLEN);
+        httpd_resp_set_type(req, "text/html");
+        httpd_resp_send(req, gamepad_min_html_start, gamepad_html_size);
         return ESP_OK;
     }
 
@@ -563,6 +414,7 @@ private:
             .user_ctx = this
         };
         httpd_register_uri_handler(web_server_, &control_uri);
+        
         web_control_enabled_ = true;
         return ESP_OK;
     }
@@ -584,11 +436,13 @@ public:
     WelleController(gpio_num_t scl, gpio_num_t sda) : scl_pin_(scl), sda_pin_(sda), pca9685_initialized_(false) {
         InitializeServos();
         LoadTrimsFromNVS();
+        action_controller_ = new UnifiedActionController(this);
         
         if (InitializePCA9685() == ESP_OK) {
-            action_queue_ = xQueueCreate(10, sizeof(WelleActionParams));
+            action_queue_ = xQueueCreate(10, sizeof(ActionParams));
             QueueHomeAction();
             RegisterMcpTools();
+            StartActionTask();
         }  
     }
 
@@ -597,279 +451,15 @@ public:
         ESP_LOGI(TAG, "开始注册MCP工具...");
 
         // 协同轮子控制
-        mcp_server.AddTool("self.welle.move_forward",
-                           "前进。speed: 速度(1-100); duration: 持续时间(毫秒)",
-                           PropertyList({Property("speed", kPropertyTypeInteger, 50, 1, 100),
-                                         Property("duration", kPropertyTypeInteger, 1000, 100, 5000)}),
+        mcp_server.AddTool("self.welle.action",
+                           "统一运动控制。格式: action_type:param。"
+                           "移动: move_forward/move_backward:speed(0-90); "
+                           "转向: turn_left/turn_right:angle(0-90);"
+                           "特殊: stop, home",
+                           PropertyList({Property("command", kPropertyTypeString, "home")}),
                            [this](const PropertyList& properties) -> ReturnValue {
-                               int speed = properties["speed"].value<int>();
-                               int duration = properties["duration"].value<int>();
-                               // 双轮同向前进
-                               int wheel_angle = 90 + speed;
-                               QueueServoAction(LEFT_WHEEL_CHANNEL, wheel_angle, 0);
-                               QueueServoAction(RIGHT_WHEEL_CHANNEL, wheel_angle, duration);
-                               // 停止
-                               QueueServoAction(LEFT_WHEEL_CHANNEL, 90, 0);
-                               QueueServoAction(RIGHT_WHEEL_CHANNEL, 90, 0);
-                               return true;
-                           });
-
-        mcp_server.AddTool("self.welle.move_backward",
-                           "后退。speed: 速度(1-100); duration: 持续时间(毫秒)",
-                           PropertyList({Property("speed", kPropertyTypeInteger, 50, 1, 100),
-                                         Property("duration", kPropertyTypeInteger, 1000, 100, 5000)}),
-                           [this](const PropertyList& properties) -> ReturnValue {
-                               int speed = properties["speed"].value<int>();
-                               int duration = properties["duration"].value<int>();
-                               // 双轮同向后退
-                               int wheel_angle = 90 - speed;
-                               QueueServoAction(LEFT_WHEEL_CHANNEL, wheel_angle, 0);
-                               QueueServoAction(RIGHT_WHEEL_CHANNEL, wheel_angle, duration);
-                               // 停止
-                               QueueServoAction(LEFT_WHEEL_CHANNEL, 90, 0);
-                               QueueServoAction(RIGHT_WHEEL_CHANNEL, 90, 0);
-                               return true;
-                           });
-
-        mcp_server.AddTool("self.welle.turn_left",
-                           "左转。speed: 速度(1-100); duration: 持续时间(毫秒)",
-                           PropertyList({Property("speed", kPropertyTypeInteger, 50, 1, 100),
-                                         Property("duration", kPropertyTypeInteger, 1000, 100, 5000)}),
-                           [this](const PropertyList& properties) -> ReturnValue {
-                               int speed = properties["speed"].value<int>();
-                               int duration = properties["duration"].value<int>();
-                               // 左轮反转，右轮正转
-                               QueueServoAction(LEFT_WHEEL_CHANNEL, 90 - speed, 0);
-                               QueueServoAction(RIGHT_WHEEL_CHANNEL, 90 + speed, duration);
-                               // 停止
-                               QueueServoAction(LEFT_WHEEL_CHANNEL, 90, 0);
-                               QueueServoAction(RIGHT_WHEEL_CHANNEL, 90, 0);
-                               return true;
-                           });
-
-        mcp_server.AddTool("self.welle.turn_right",
-                           "右转。speed: 速度(1-100); duration: 持续时间(毫秒)",
-                           PropertyList({Property("speed", kPropertyTypeInteger, 50, 1, 100),
-                                         Property("duration", kPropertyTypeInteger, 1000, 100, 5000)}),
-                           [this](const PropertyList& properties) -> ReturnValue {
-                               int speed = properties["speed"].value<int>();
-                               int duration = properties["duration"].value<int>();
-                               // 左轮正转，右轮反转
-                               QueueServoAction(LEFT_WHEEL_CHANNEL, 90 + speed, 0);
-                               QueueServoAction(RIGHT_WHEEL_CHANNEL, 90 - speed, duration);
-                               // 停止
-                               QueueServoAction(LEFT_WHEEL_CHANNEL, 90, 0);
-                               QueueServoAction(RIGHT_WHEEL_CHANNEL, 90, 0);
-                               return true;
-                           });
-
-        mcp_server.AddTool("self.welle.stop_wheels",
-                           "停止车轮",
-                           PropertyList(),
-                           [this](const PropertyList& properties) -> ReturnValue {
-                               QueueServoAction(LEFT_WHEEL_CHANNEL, 90, 0);
-                               QueueServoAction(RIGHT_WHEEL_CHANNEL, 90, 0);
-                               return true;
-                           });
-
-        // 单个轮子控制 (高级用户)
-        mcp_server.AddTool("self.welle.left_wheel",
-                           "左轮独立控制。speed: 速度(-100到100，负值反转，0停止，正值正转); delay: 延时(毫秒)",
-                           PropertyList({Property("speed", kPropertyTypeInteger, 0, -100, 100),
-                                         Property("delay", kPropertyTypeInteger, 0, 0, 2000)}),
-                           [this](const PropertyList& properties) -> ReturnValue {
-                               int speed = properties["speed"].value<int>();
-                               int delay = properties["delay"].value<int>();
-                               int angle = 90 + (speed * 90 / 100);
-                               QueueServoAction(LEFT_WHEEL_CHANNEL, angle, delay);
-                               return true;
-                           });
-
-        mcp_server.AddTool("self.welle.right_wheel",
-                           "右轮独立控制。speed: 速度(-100到100，负值反转，0停止，正值正转); delay: 延时(毫秒)",
-                           PropertyList({Property("speed", kPropertyTypeInteger, 0, -100, 100),
-                                         Property("delay", kPropertyTypeInteger, 0, 0, 2000)}),
-                           [this](const PropertyList& properties) -> ReturnValue {
-                               int speed = properties["speed"].value<int>();
-                               int delay = properties["delay"].value<int>();
-                               int angle = 90 + (speed * 90 / 100);
-                               QueueServoAction(RIGHT_WHEEL_CHANNEL, angle, delay);
-                               return true;
-                           });
-
-        // 手部控制
-        mcp_server.AddTool("self.welle.left_hand",
-                           "左手上下移动。angle: 角度(0-180度); delay: 延时(毫秒)",
-                           PropertyList({Property("angle", kPropertyTypeInteger, 90, 0, 180),
-                                         Property("delay", kPropertyTypeInteger, 0, 0, 2000)}),
-                           [this](const PropertyList& properties) -> ReturnValue {
-                               int angle = properties["angle"].value<int>();
-                               int delay = properties["delay"].value<int>();
-                               QueueServoAction(LEFT_HAND_CHANNEL, angle, delay);
-                               return true;
-                           });
-
-        mcp_server.AddTool("self.welle.right_hand",
-                           "右手上下移动。angle: 角度(0-180度); delay: 延时(毫秒)",
-                           PropertyList({Property("angle", kPropertyTypeInteger, 90, 0, 180),
-                                         Property("delay", kPropertyTypeInteger, 0, 0, 2000)}),
-                           [this](const PropertyList& properties) -> ReturnValue {
-                               int angle = properties["angle"].value<int>();
-                               int delay = properties["delay"].value<int>();
-                               QueueServoAction(RIGHT_HAND_CHANNEL, angle, delay);
-                               return true;
-                           });
-
-        // 眼部控制
-        mcp_server.AddTool("self.welle.left_eye",
-                           "左眼上下移动。angle: 角度(0-180度); delay: 延时(毫秒)",
-                           PropertyList({Property("angle", kPropertyTypeInteger, 90, 0, 180),
-                                         Property("delay", kPropertyTypeInteger, 0, 0, 2000)}),
-                           [this](const PropertyList& properties) -> ReturnValue {
-                               int angle = properties["angle"].value<int>();
-                               int delay = properties["delay"].value<int>();
-                               QueueServoAction(LEFT_EYE_CHANNEL, angle, delay);
-                               return true;
-                           });
-
-        mcp_server.AddTool("self.welle.right_eye",
-                           "右眼上下移动。angle: 角度(0-180度); delay: 延时(毫秒)",
-                           PropertyList({Property("angle", kPropertyTypeInteger, 90, 0, 180),
-                                         Property("delay", kPropertyTypeInteger, 0, 0, 2000)}),
-                           [this](const PropertyList& properties) -> ReturnValue {
-                               int angle = properties["angle"].value<int>();
-                               int delay = properties["delay"].value<int>();
-                               QueueServoAction(RIGHT_EYE_CHANNEL, angle, delay);
-                               return true;
-                           });
-
-        // 头颈控制
-        mcp_server.AddTool("self.welle.neck",
-                           "脖子左右转动。angle: 角度(0-180度); delay: 延时(毫秒)",
-                           PropertyList({Property("angle", kPropertyTypeInteger, 90, 0, 180),
-                                         Property("delay", kPropertyTypeInteger, 0, 0, 2000)}),
-                           [this](const PropertyList& properties) -> ReturnValue {
-                               int angle = properties["angle"].value<int>();
-                               int delay = properties["delay"].value<int>();
-                               QueueServoAction(NECK_CHANNEL, angle, delay);
-                               return true;
-                           });
-
-        mcp_server.AddTool("self.welle.head",
-                           "头部上下移动。angle: 角度(0-180度); delay: 延时(毫秒)",
-                           PropertyList({Property("angle", kPropertyTypeInteger, 90, 0, 180),
-                                         Property("delay", kPropertyTypeInteger, 0, 0, 2000)}),
-                           [this](const PropertyList& properties) -> ReturnValue {
-                               int angle = properties["angle"].value<int>();
-                               int delay = properties["delay"].value<int>();
-                               QueueServoAction(HEAD_CHANNEL, angle, delay);
-                               return true;
-                           });
-
-        // 姿态控制动作
-
-        // 姿态控制
-        mcp_server.AddTool("self.welle.look_up",
-                           "抬头。angle: 角度(90-180); delay: 延时(毫秒)",
-                           PropertyList({Property("angle", kPropertyTypeInteger, 120, 90, 180),
-                                         Property("delay", kPropertyTypeInteger, 500, 0, 2000)}),
-                           [this](const PropertyList& properties) -> ReturnValue {
-                               int angle = properties["angle"].value<int>();
-                               int delay = properties["delay"].value<int>();
-                               QueueServoAction(HEAD_CHANNEL, angle, delay);
-                               return true;
-                           });
-
-        mcp_server.AddTool("self.welle.look_down",
-                           "低头。angle: 角度(0-90); delay: 延时(毫秒)",
-                           PropertyList({Property("angle", kPropertyTypeInteger, 60, 0, 90),
-                                         Property("delay", kPropertyTypeInteger, 500, 0, 2000)}),
-                           [this](const PropertyList& properties) -> ReturnValue {
-                               int angle = properties["angle"].value<int>();
-                               int delay = properties["delay"].value<int>();
-                               QueueServoAction(HEAD_CHANNEL, angle, delay);
-                               return true;
-                           });
-
-        mcp_server.AddTool("self.welle.turn_head_left",
-                           "左转头。angle: 角度(90-180); delay: 延时(毫秒)",
-                           PropertyList({Property("angle", kPropertyTypeInteger, 135, 90, 180),
-                                         Property("delay", kPropertyTypeInteger, 500, 0, 2000)}),
-                           [this](const PropertyList& properties) -> ReturnValue {
-                               int angle = properties["angle"].value<int>();
-                               int delay = properties["delay"].value<int>();
-                               QueueServoAction(NECK_CHANNEL, angle, delay);
-                               return true;
-                           });
-
-        mcp_server.AddTool("self.welle.turn_head_right",
-                           "右转头。angle: 角度(0-90); delay: 延时(毫秒)",
-                           PropertyList({Property("angle", kPropertyTypeInteger, 45, 0, 90),
-                                         Property("delay", kPropertyTypeInteger, 500, 0, 2000)}),
-                           [this](const PropertyList& properties) -> ReturnValue {
-                               int angle = properties["angle"].value<int>();
-                               int delay = properties["delay"].value<int>();
-                               QueueServoAction(NECK_CHANNEL, angle, delay);
-                               return true;
-                           });
-
-        mcp_server.AddTool("self.welle.wave_hands",
-                           "挥手。cycles: 挥手次数(1-10); speed: 速度(毫秒)",
-                           PropertyList({Property("cycles", kPropertyTypeInteger, 3, 1, 10),
-                                         Property("speed", kPropertyTypeInteger, 300, 100, 1000)}),
-                           [this](const PropertyList& properties) -> ReturnValue {
-                               int cycles = properties["cycles"].value<int>();
-                               int speed = properties["speed"].value<int>();
-                               for (int i = 0; i < cycles; i++) {
-                                   // 左右手交替上下挥动
-                                   QueueServoAction(LEFT_HAND_CHANNEL, 45, speed);
-                                   QueueServoAction(RIGHT_HAND_CHANNEL, 135, speed);
-                                   QueueServoAction(LEFT_HAND_CHANNEL, 135, speed);
-                                   QueueServoAction(RIGHT_HAND_CHANNEL, 45, speed);
-                               }
-                               // 回到中心位置
-                               QueueServoAction(LEFT_HAND_CHANNEL, 90, speed);
-                               QueueServoAction(RIGHT_HAND_CHANNEL, 90, 0);
-                               return true;
-                           });
-
-        mcp_server.AddTool("self.welle.blink_eyes",
-                           "眨眼。cycles: 眨眼次数(1-10); speed: 速度(毫秒)",
-                           PropertyList({Property("cycles", kPropertyTypeInteger, 3, 1, 10),
-                                         Property("speed", kPropertyTypeInteger, 200, 50, 1000)}),
-                           [this](const PropertyList& properties) -> ReturnValue {
-                               int cycles = properties["cycles"].value<int>();
-                               int speed = properties["speed"].value<int>();
-                               for (int i = 0; i < cycles; i++) {
-                                   // 闭眼
-                                   QueueServoAction(LEFT_EYE_CHANNEL, 45, speed);
-                                   QueueServoAction(RIGHT_EYE_CHANNEL, 45, speed);
-                                   // 张眼
-                                   QueueServoAction(LEFT_EYE_CHANNEL, 135, speed);
-                                   QueueServoAction(RIGHT_EYE_CHANNEL, 135, speed);
-                               }
-                               // 回到中心位置
-                               QueueServoAction(LEFT_EYE_CHANNEL, 90, speed);
-                               QueueServoAction(RIGHT_EYE_CHANNEL, 90, 0);
-                               return true;
-                           });
-    
-        mcp_server.AddTool("self.welle.home", "回到中心位置", PropertyList(),
-                           [this](const PropertyList& properties) -> ReturnValue {
-                               QueueHomeAction();
-                               return true;
-                           });
-
-        mcp_server.AddTool("self.welle.stop", "立即停止", PropertyList(),
-                           [this](const PropertyList& properties) -> ReturnValue {
-                               if (action_task_handle_ != nullptr) {
-                                   vTaskDelete(action_task_handle_);
-                                   action_task_handle_ = nullptr;
-                               }
-                               is_action_in_progress_ = false;
-                               xQueueReset(action_queue_);
-                               QueueHomeAction();
-                               return true;
+                               std::string command = properties["command"].value<std::string>();
+                               return action_controller_->ExecuteAction(command) ? "OK" : "FAILED";
                            });
 
         mcp_server.AddTool(
@@ -906,7 +496,7 @@ public:
                 servo_configs_[channel].trim = trim_value;
                 
                 // 测试舵机动作
-                QueueServoAction(channel, servo_configs_[channel].center_angle, 100);
+                QueueServoAction(channel, servo_configs_[channel].center_angle);
 
                 return "舵机 " + servo_type + " 微调设置为 " + std::to_string(trim_value) +
                        " 度，已永久保存";
@@ -937,8 +527,8 @@ public:
                            });
 
         // Web控制服务器管理
-        mcp_server.AddTool("self.welle.start_web_control",
-                           "启动Web控制服务器，用户可通过浏览器访问IP地址控制机器人",
+        mcp_server.AddTool("self.welle.start_web",
+                           "启动Web控制服务器",
                            PropertyList(),
                            [this](const PropertyList& properties) -> ReturnValue {
                                esp_err_t ret = StartWebServer();
@@ -957,7 +547,7 @@ public:
                                }
                            });
 
-        mcp_server.AddTool("self.welle.stop_web_control",
+        mcp_server.AddTool("self.welle.stop_web",
                            "停止Web控制服务器",
                            PropertyList(),
                            [this](const PropertyList& properties) -> ReturnValue {
@@ -965,7 +555,7 @@ public:
                                return ret == ESP_OK ? "Web控制服务器已停止" : "停止Web控制服务器失败";
                            });
 
-        mcp_server.AddTool("self.welle.web_control_status",
+        mcp_server.AddTool("self.welle.web_status",
                            "获取Web控制服务器运行状态",
                            PropertyList(),
                            [this](const PropertyList& properties) -> ReturnValue {
@@ -983,17 +573,6 @@ public:
                                    return "Web控制服务器未启动";
                                }
                            });
-
-        // 处理WiFi消息的MCP工具 (用于调试和高级用户)
-        mcp_server.AddTool("self.welle.process_wifi_message",
-                           "处理WiFi控制消息进行舵机控制。message: 消息内容(支持格式: s1:180,s2:90 或 preset1/preset2/preset3/center)",
-                           PropertyList({Property("message", kPropertyTypeString, "center")}),
-                           [this](const PropertyList& properties) -> ReturnValue {
-                               std::string message = properties["message"].value<std::string>();
-                               ProcessWifiMessage(message.c_str());
-                               return "已处理WiFi消息: " + message;
-                           });
-
         ESP_LOGI(TAG, "MCP工具注册完成");
     }
 
@@ -1009,6 +588,11 @@ public:
             action_task_handle_ = nullptr;
         }
         vQueueDelete(action_queue_);
+        
+        if (action_controller_ != nullptr) {
+            delete action_controller_;
+            action_controller_ = nullptr;
+        }
     }
 };
 

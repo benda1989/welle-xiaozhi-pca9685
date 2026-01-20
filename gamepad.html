@@ -1,0 +1,520 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body { 
+            font-family: Arial, sans-serif; 
+            margin: 0; 
+            padding: 20px; 
+            user-select: none;
+        }
+        
+        .gamepad-container { 
+            max-width: 1000px; 
+            margin: 0 auto; 
+            padding: 20px; 
+            border: 1px solid #ccc;
+        }
+        
+        .gamepad-layout {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 40px;
+            min-height: 400px;
+        }
+        
+        .left-controls, .middle-controls, .right-controls {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 20px;
+        }
+
+        .joystick-outer {
+            position: relative;
+            width: 150px;
+            height: 150px;
+            border: 2px solid #333;
+            border-radius: 50%;
+        }
+        
+        .joystick-inner {
+            position: absolute;
+            width: 50px;
+            height: 50px;
+            background: #666;
+            border: 2px solid #333;
+            border-radius: 50%;
+            cursor: grab;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+        }
+        
+
+        .vertical-slider-container, .eye-slider-container {
+            width: 50px;
+            height: 120px;
+            background: #f5f5f5;
+            border: 2px solid #333;
+            position: relative;
+        }
+        
+        .horizontal-slider-container {
+            width: 150px;
+            height: 50px;
+            background: #f5f5f5;
+            border: 2px solid #333;
+            position: relative;
+        }
+        
+        .head-slider-container {
+            width: 50px;
+            height: 100px;
+            background: #f5f5f5;
+            border: 2px solid #333;
+            position: relative;
+        }
+
+        .vertical-slider-handle, .eye-slider-handle, .head-slider-handle {
+            position: absolute;
+            width: 48px;
+            height: 27px;
+            background: #666;
+            border: 1px solid #333;
+            cursor: grab;
+            left: 50%;
+            transform: translateX(-50%);
+        }
+        
+        .horizontal-slider-handle {
+            position: absolute;
+            width: 27px;
+            height: 48px;
+            background: #666;
+            border: 1px solid #333;
+            cursor: grab;
+            top: 50%;
+            transform: translateY(-50%);
+        }
+        
+        .joystick-inner:active, .joystick-inner.dragging,
+        .vertical-slider-handle:active, .eye-slider-handle:active, .head-slider-handle:active,
+        .horizontal-slider-handle:active,
+        .vertical-slider-handle.dragging, .eye-slider-handle.dragging, .head-slider-handle.dragging,
+        .horizontal-slider-handle.dragging {
+            cursor: grabbing;
+        }
+
+        .hand-controls, .eye-controls {
+            display: flex;
+            gap: 30px;
+            align-items: center;
+        }
+        
+        .control-label {
+            font-size: 12px;
+            text-align: center;
+            margin-bottom: 5px;
+        }
+        
+        .angle-display {
+            font-size: 14px;
+            font-weight: bold;
+            text-align: center;
+            margin-top: 5px;
+        }
+        
+ 
+        
+        .preset-btn {
+            padding: 10px 20px;
+            margin: 5px;
+            background: #f0f0f0;
+            border: 1px solid #333;
+            cursor: pointer;
+            font-size: 14px;
+        }
+
+        #status {
+            text-align: center;
+            margin: 15px 0;
+            padding: 10px;
+            border: 1px solid #ccc;
+            font-size: 14px;
+        }
+
+    </style>
+</head>
+<body>
+    <div class="gamepad-container">
+        <div class="gamepad-layout">
+            <div class="left-controls">
+                <button class="preset-btn" onclick="resetAllToCenter()">回中心</button>
+                <div class="joystick-outer" id="joystickOuter">
+                    <div class="joystick-inner" id="joystickInner"></div>
+                </div>
+                <div id="status">控制器就绪</div>
+             </div>
+            <div class="middle-controls">
+                <div>
+                    <div class="control-label"></div>
+                    <div class="eye-controls">
+                        <div>
+                            <div class="control-label">左眼</div>
+                            <div class="eye-slider-container">
+                                <div class="eye-slider-handle" data-servo="4" data-min="0" data-max="180" data-value="90"></div>
+                            </div>
+                            <div class="angle-display" id="s4_val">90°</div>
+                        </div>
+                        <div>
+                            <div class="control-label">右眼</div>
+                            <div class="eye-slider-container">
+                                <div class="eye-slider-handle" data-servo="5" data-min="0" data-max="180" data-value="90"></div>
+                            </div>
+                            <div class="angle-display" id="s5_val">90°</div>
+                        </div>
+                    </div>
+                </div>
+                <div>
+                    <div class="control-label">头部</div>
+                    <div class="head-slider-container">
+                        <div class="head-slider-handle" data-servo="7" data-min="0" data-max="180" data-value="90"></div>
+                    </div>
+                    <div class="angle-display" id="s7_val">90°</div>
+                </div>
+            </div>
+            <div class="right-controls">
+                <div>
+                    <div class="control-label">脖子</div>
+                    <div class="horizontal-slider-container">
+                        <div class="horizontal-slider-handle" data-servo="6" data-min="0" data-max="180" data-value="90"></div>
+                    </div>
+                    <div class="angle-display" id="s6_val">90°</div>
+                </div>
+                <div>
+                    <div class="control-label"></div>
+                    <div class="hand-controls">
+                        <div>
+                            <div class="control-label">左手</div>
+                            <div class="vertical-slider-container">
+                                <div class="vertical-slider-handle" data-servo="2" data-min="0" data-max="180" data-value="90"></div>
+                            </div>
+                            <div class="angle-display" id="s2_val">90°</div>
+                        </div>
+                        <div>
+                            <div class="control-label">右手</div>
+                            <div class="vertical-slider-container">
+                                <div class="vertical-slider-handle" data-servo="3" data-min="0" data-max="180" data-value="90"></div>
+                            </div>
+                            <div class="angle-display" id="s3_val">90°</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        let isDragging = false;
+        let joystickCenter = { x: 0, y: 0 };
+        let joystickRadius = 75;
+        let knobRadius = 25;
+        let currentPosition = { x: 0, y: 0 };
+        let moveCommandTimer = null;
+        let sliderDragging = null;
+        let lastCommandParams = { type: "", speed: 0 };
+        
+        const joystickOuter = document.getElementById('joystickOuter');
+        const joystickInner = document.getElementById('joystickInner');
+        const allSliders = document.querySelectorAll('.vertical-slider-handle, .eye-slider-handle, .head-slider-handle, .horizontal-slider-handle');
+
+        function clearAllTimers() {
+            if (moveCommandTimer) {
+                clearTimeout(moveCommandTimer);
+                moveCommandTimer = null
+            }
+        }
+        
+        // 滑块位置计算通用函数
+        function calculateSliderPosition(slider, container, isHorizontal) {
+            const handleSize = parseInt(getComputedStyle(slider)[isHorizontal ? 'width' : 'height']);
+            const containerSize = container[isHorizontal ? 'clientWidth' : 'clientHeight'] - 4;
+            const maxPosition = containerSize - handleSize;
+            return { handleSize, containerSize, maxPosition };
+        }
+        
+        function setSliderPosition(slider, value, isHorizontal, calculations) {
+            if (isHorizontal) {
+                const position = (value / 180) * (calculations.containerSize - calculations.handleSize);
+                slider.style.left = position + 'px';
+            } else {
+                const position = calculations.containerSize - ((value / 180) * (calculations.containerSize - calculations.handleSize));
+                slider.style.top = (position - 27) + 'px';
+            }
+        }
+
+        function initJoystick() {
+            const rect = joystickOuter.getBoundingClientRect();
+            joystickCenter.x = rect.width / 2;
+            joystickCenter.y = rect.height / 2;
+        }
+
+        function initSliders(defaultValue = 90) {
+            allSliders.forEach(slider => {
+                const container = slider.parentElement;
+                const isHorizontal = slider.classList.contains('horizontal-slider-handle');
+                const calculations = calculateSliderPosition(slider, container, isHorizontal);
+                setSliderPosition(slider, defaultValue, isHorizontal, calculations);
+            });
+        }
+
+        function updateJoystickPosition(x, y) {
+            const deltaX = x - joystickCenter.x;
+            const deltaY = y - joystickCenter.y;
+            const distance = Math.sqrt(deltaX * deltaX + deltaY * deltaY);
+            
+            const maxDistance = joystickRadius - knobRadius;
+            let finalX = deltaX;
+            let finalY = deltaY;
+            
+            if (distance > maxDistance) {
+                const ratio = maxDistance / distance;
+                finalX = deltaX * ratio;
+                finalY = deltaY * ratio;
+            }
+            
+            joystickInner.style.transform = `translate(${finalX - knobRadius}px, ${finalY - knobRadius}px)`;
+            
+            const normalizedX = finalX / maxDistance;
+            const normalizedY = -finalY / maxDistance;
+            
+            currentPosition.x = normalizedX;
+            currentPosition.y = normalizedY;
+            
+            handleMovement(normalizedX, normalizedY);
+        }
+
+
+        function handleMovement(x, y) {
+            clearAllTimers();
+            const intensity = Math.sqrt(x * x + y * y);
+            let commandType = "";
+            let speed = 0;
+            
+            if (intensity < 0.1) {
+                commandType = "stop";
+                speed = 0;
+            } else {
+                speed = Math.min(Math.floor(intensity * 100), 100);
+                
+                if (Math.abs(y) > Math.abs(x)) {
+                    commandType = y > 0 ? "move_forward" : "move_backward";
+                } else {
+                    commandType = x > 0 ? "turn_right" : "turn_left";
+                }
+            }
+            
+            // 判断是否需要发送命令（类型改变或速度差值大于10）
+            const shouldSend = commandType !== lastCommandParams.type || 
+                              Math.abs(speed - lastCommandParams.speed) >= 10;
+            
+            if (shouldSend) {
+                sendCommand(commandType, speed);
+                lastCommandParams = { type: commandType, speed: speed };
+            }
+            
+            // 每0.3秒重新计算一次
+            moveCommandTimer = setTimeout(() => {
+                if (isDragging) {
+                    handleMovement(currentPosition.x, currentPosition.y);
+                }
+            }, 300);
+        }
+
+
+        function resetJoystick() {
+            joystickInner.style.transform = 'translate(-50%, -50%)';
+            currentPosition.x = 0;
+            currentPosition.y = 0;
+            
+            // 清除所有定时器
+            clearAllTimers();
+            
+            // 发送停止命令（如果之前发送过移动命令）
+            if (lastCommandParams.type !== "" && lastCommandParams.type !== "stop") {
+                sendCommand("stop", "0");
+                lastCommandParams = { type: "stop", speed: 0 };
+            }
+        }
+
+        function updateSliderValue(slider, newValue) {
+            const servo = parseInt(slider.dataset.servo);
+            const min = parseInt(slider.dataset.min);
+            const max = parseInt(slider.dataset.max);
+            
+            newValue = Math.max(min, Math.min(max, newValue));
+            slider.dataset.value = newValue;
+            
+            document.getElementById(`s${servo}_val`).textContent = `${newValue}°`;
+        }
+
+        function handleSliderDrag(slider, clientX, clientY) {
+            const container = slider.parentElement;
+            const rect = container.getBoundingClientRect();
+            const isHorizontal = slider.classList.contains('horizontal-slider-handle');
+            
+            const handleSize = parseInt(getComputedStyle(slider)[isHorizontal ? 'width' : 'height']);
+            const containerSize = rect[isHorizontal ? 'width' : 'height'] - 4;
+            const maxPosition = containerSize - handleSize;
+            
+            let relative, clamped, value;
+            
+            if (isHorizontal) {
+                relative = clientX - rect.left - 2 - (handleSize / 2);
+                clamped = Math.max(0, Math.min(maxPosition, relative));
+                value = Math.round((clamped / maxPosition) * 18) * 10; // 10度步进
+                slider.style.left = (clamped - 2) + 'px';
+            } else {
+                relative = clientY - rect.top - 2 - (handleSize / 2);
+                clamped = Math.max(0, Math.min(maxPosition, relative));
+                value = Math.round((1 - (clamped / maxPosition)) * 18) * 10; // 10度步进
+                slider.style.top = (clamped - 2) + 'px';
+            }
+            
+            updateSliderValue(slider, value); // 拖动时不发送命令
+        }
+
+        function addEventListeners() {
+            joystickInner.addEventListener('mousedown', (e) => {
+                isDragging = true;
+                joystickInner.classList.add('dragging');
+                e.preventDefault();
+            });
+            
+            document.addEventListener('mousemove', (e) => {
+                if (isDragging) {
+                    const rect = joystickOuter.getBoundingClientRect();
+                    updateJoystickPosition(e.clientX - rect.left, e.clientY - rect.top);
+                }
+                if (sliderDragging) {
+                    handleSliderDrag(sliderDragging, e.clientX, e.clientY);
+                }
+            });
+            
+            document.addEventListener('mouseup', () => {
+                if (isDragging) {
+                    isDragging = false;
+                    joystickInner.classList.remove('dragging');
+                    setTimeout(() => {
+                        if (!isDragging) resetJoystick();
+                    }, 100);
+                }
+                if (sliderDragging) {
+                    sliderDragging.classList.remove('dragging');
+                    
+                    // 鼠标释放时发送滑块的最终值
+                    const servo = parseInt(sliderDragging.dataset.servo);
+                    const finalValue = parseInt(sliderDragging.dataset.value);
+                    sendCommand(servo, finalValue);
+                    
+                    sliderDragging = null;
+                }
+            });
+
+            allSliders.forEach(slider => {
+                slider.addEventListener('mousedown', (e) => {
+                    sliderDragging = slider;
+                    slider.classList.add('dragging');
+                    e.preventDefault();
+                    e.stopPropagation();
+                });
+            });
+
+            joystickInner.addEventListener('touchstart', (e) => {
+                isDragging = true;
+                joystickInner.classList.add('dragging');
+                e.preventDefault();
+            });
+            
+            document.addEventListener('touchmove', (e) => {
+                if (isDragging) {
+                    const touch = e.touches[0];
+                    const rect = joystickOuter.getBoundingClientRect();
+                    updateJoystickPosition(touch.clientX - rect.left, touch.clientY - rect.top);
+                }
+                if (sliderDragging) {
+                    const touch = e.touches[0];
+                    handleSliderDrag(sliderDragging, touch.clientX, touch.clientY);
+                }
+                e.preventDefault();
+            });
+            
+            document.addEventListener('touchend', () => {
+                if (isDragging) {
+                    isDragging = false;
+                    joystickInner.classList.remove('dragging');
+                    setTimeout(() => {
+                        if (!isDragging) resetJoystick();
+                    }, 100);
+                }
+                if (sliderDragging) {
+                    sliderDragging.classList.remove('dragging');
+                    
+                    // 触摸释放时发送滑块的最终值
+                    const servo = parseInt(sliderDragging.dataset.servo);
+                    const finalValue = parseInt(sliderDragging.dataset.value);
+                    sendCommand(servo, finalValue);
+                    
+                    sliderDragging = null;
+                }
+            });
+
+            allSliders.forEach(slider => {
+                slider.addEventListener('touchstart', (e) => {
+                    sliderDragging = slider;
+                    slider.classList.add('dragging');
+                    e.preventDefault();
+                    e.stopPropagation();
+                });
+            });
+        }
+        
+ 
+        function resetAllToCenter() {
+            resetJoystick();
+            initSliders();
+            sendCommand('home', '0');
+        }
+
+        function sendCommand(action, angle) {
+            const cmd = `${action}:${angle}`;
+            console.log('发送命令:', cmd);
+            document.getElementById('status').textContent = '发送: ' + cmd;
+            
+            fetch('/control', {
+                method: 'POST',
+                body: cmd
+            })
+            .then(response => {
+                if (response.ok) {
+                    document.getElementById('status').textContent = '执行: ' + cmd;
+                }  
+            })
+            .catch(error => {
+                console.error('发送命令失败:', error);
+            });
+        }
+        
+        window.onload = function() {
+            initJoystick();
+            initSliders();
+            addEventListeners();
+        };
+    </script>
+</body>
+</html> 

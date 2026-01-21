@@ -7,3 +7,5 @@ idf_component_register gamepad.min.html
 
 # web
 ![gamepad](gamepad.png)
+![arrange](arrange.png)
+![steps](steps.png)

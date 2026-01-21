@@ -6,6 +6,11 @@ CMakeLists.txt:
 idf_component_register gamepad.min.html
 
 # web
+## gamepad control
 ![gamepad](gamepad.png)
+## action arrange edit
 ![arrange](arrange.png)
+## action step edit
 ![steps](steps.png)
+
+## If helpful, Please give me a star

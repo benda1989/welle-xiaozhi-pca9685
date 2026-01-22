@@ -251,12 +251,12 @@ private:
                     right_wheel_angle = left_wheel_angle;
                     break;
                     
-                case ActionType::TURN_LEFT:
+                case ActionType::TURN_RIGHT:
                     left_wheel_angle = 90 ;
                     right_wheel_angle = 90 + std::min(speed, 90);
                     break;
                     
-                case ActionType::TURN_RIGHT:
+                case ActionType::TURN_LEFT:
                     left_wheel_angle = 90 + std::min(speed, 90);
                     right_wheel_angle = 90;
                     break;
